@@ -95,7 +95,7 @@ class MainActivity : AppCompatActivity() {
 
     // Fungsi Cek Update otomatis dari file JSON di GitHub
     private fun checkUpdate() {
-        val url = "https://miniso-id.github.io/app/version.json"
+        val url = "https://mmsx.pages.dev/app/version.json"
 
         // Ambil versi APK saat ini
         val currentVersion = try {
