@@ -14,8 +14,8 @@ android {
         applicationId = "com.miniso.mms_x"
         minSdk = 24
         targetSdk = 36
-        versionCode = 7
-        versionName = "3.1.0"
+        versionCode = 8
+        versionName = "3.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
