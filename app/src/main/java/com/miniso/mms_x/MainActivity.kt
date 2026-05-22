@@ -78,7 +78,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 4. Load URL aplikasi Miniso kamu
-        webView.loadUrl("https://minisoindo.pages.dev/app/?app=mmsx")
+        webView.loadUrl("https://mmsx.pages.dev/app/?app=mmsx")
 
         // 5. Cek Izin Kamera & Jalankan Cek Update
         checkCameraPermission()
@@ -95,7 +95,7 @@ class MainActivity : AppCompatActivity() {
 
     // Fungsi Cek Update otomatis dari file JSON di GitHub
     private fun checkUpdate() {
-        val url = "https://minisoindo.pages.dev/app/version.json"
+        val url = "https://miniso-id.github.io/app/version.json"
 
         // Ambil versi APK saat ini
         val currentVersion = try {
@@ -128,7 +128,7 @@ class MainActivity : AppCompatActivity() {
     private fun showUpdateDialog(downloadUrl: String) {
         AlertDialog.Builder(this)
             .setTitle("Update MMS-X Tersedia")
-            .setMessage("Versi terbaru sudah tersedia. Download sekarang untuk fitur terbaru?")
+            .setMessage("Versi terbaru sudah tersedia. Download sekarang ?")
             .setCancelable(false) // User harus memilih
             .setPositiveButton("Download") { _, _ ->
                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl))
