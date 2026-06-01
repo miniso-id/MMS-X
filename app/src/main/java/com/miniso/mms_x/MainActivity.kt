@@ -2,11 +2,7 @@ package com.miniso.mms_x
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.app.DownloadManager
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -35,6 +31,9 @@ import com.android.volley.Request
 import com.android.volley.toolbox.JsonObjectRequest
 import com.android.volley.toolbox.Volley
 import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 class MainActivity : AppCompatActivity() {
 
@@ -45,33 +44,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var downloadTitle: TextView
 
     private val TARGET_URL = "https://mmsx.pages.dev/app/?app=mmsx"
-    private var downloadId: Long = -1
+    private var isUpdatePending = false
     private val handler = Handler(Looper.getMainLooper())
-    private var progressRunnable: Runnable? = null
-    private var pendingApkName: String? = null
 
     companion object {
         private const val REQUEST_INSTALL_PERMISSION = 200
     }
 
-    private val downloadReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
-            if (id == downloadId) {
-                stopProgressPolling()
-                // Set 100% dulu sebentar, baru hide
-                runOnUiThread {
-                    downloadProgressBar.progress = 100
-                    downloadPercent.text = "100%"
-                }
-                handler.postDelayed({
-                    hideDownloadOverlay()
-                    triggerInstall()
-                }, 600)
-            }
-        }
-    }
-
+    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -94,15 +74,12 @@ class MainActivity : AppCompatActivity() {
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (request.isForMainFrame) view.loadUrl("file:///android_asset/offline.html")
             }
-
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                 if (url == null) return false
                 if (url.startsWith("intent://") || url.startsWith("lark://") || url.startsWith("feishu://")) {
                     try {
                         val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
-                        if (intent.resolveActivity(packageManager) != null) {
-                            startActivity(intent); return true
-                        }
+                        if (intent.resolveActivity(packageManager) != null) { startActivity(intent); return true }
                         val fallback = intent.getStringExtra("browser_fallback_url")
                         view?.loadUrl(fallback ?: "https://play.google.com/store/apps/details?id=com.ss.android.lark")
                         return true
@@ -124,26 +101,22 @@ class MainActivity : AppCompatActivity() {
 
         checkCameraPermission()
         checkUpdate()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
-        }
     }
 
+    // ===== KONEKSI =====
     private fun isOnline(): Boolean {
         val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
         val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return false) ?: return false
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
+    // ===== KAMERA =====
     private fun checkCameraPermission() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 101)
     }
 
+    // ===== CEK UPDATE =====
     private fun checkUpdate() {
         val currentVersion = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
@@ -153,9 +126,9 @@ class MainActivity : AppCompatActivity() {
 
         val req = JsonObjectRequest(Request.Method.GET, "https://mmsx.pages.dev/app/version.json", null,
             { response ->
-                val latest = response.getInt("latestVersionCode")
-                val name   = response.getString("latestVersionName")
-                val dlUrl  = response.getString("updateUrl")
+                val latest  = response.getInt("latestVersionCode")
+                val name    = response.getString("latestVersionName")
+                val dlUrl   = response.getString("updateUrl")
                 if (latest > currentVersion) showUpdateDialog(name, dlUrl)
             },
             { android.util.Log.e("MMSX", "Gagal cek update: ${it.message}") }
@@ -163,80 +136,131 @@ class MainActivity : AppCompatActivity() {
         Volley.newRequestQueue(this).add(req)
     }
 
+    // ===== DIALOG UPDATE WAJIB =====
     private fun showUpdateDialog(versionName: String, downloadUrl: String) {
-        AlertDialog.Builder(this)
-            .setTitle("Update MMS-X Tersedia")
-            .setMessage("Versi $versionName sudah tersedia.\nDownload dan install sekarang?")
-            .setCancelable(false)
-            .setPositiveButton("Download & Install") { _, _ -> startDownload(downloadUrl, versionName) }
-            .setNegativeButton("Nanti", null)
-            .show()
+        isUpdatePending = true
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("Update Tersedia")
+                .setMessage("Versi $versionName sudah tersedia. Silakan update untuk melanjutkan.")
+                .setCancelable(false)
+                .setPositiveButton("Download & Install") { _, _ -> startDownload(downloadUrl, versionName) }
+                .create().also {
+                    it.setCanceledOnTouchOutside(false)
+                    it.show()
+                }
+        }
     }
 
+    // ===== DOWNLOAD PAKAI THREAD (bukan DownloadManager) =====
     private fun startDownload(downloadUrl: String, versionName: String) {
-        pendingApkName = "MMS-X-$versionName.apk"
-        getSharedPreferences("mmsx_prefs", MODE_PRIVATE).edit().putString("pending_apk", pendingApkName).apply()
+        val apkFile = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "MMS-X-$versionName.apk")
+        if (apkFile.exists()) apkFile.delete()
 
-        File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), pendingApkName!!).also { if (it.exists()) it.delete() }
+        // Simpan nama file
+        getSharedPreferences("mmsx_prefs", MODE_PRIVATE)
+            .edit().putString("pending_apk", apkFile.absolutePath).apply()
 
-        val request = DownloadManager.Request(Uri.parse(downloadUrl)).apply {
-            setTitle("MMS-X Update")
-            setDescription("Mengunduh MMS-X v$versionName...")
-            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            setDestinationInExternalFilesDir(this@MainActivity, Environment.DIRECTORY_DOWNLOADS, pendingApkName!!)
-            setMimeType("application/vnd.android.package-archive")
+        // Tampilkan overlay progress
+        runOnUiThread {
+            downloadTitle.text = "Mengunduh MMS-X v$versionName..."
+            downloadPercent.text = "0%"
+            downloadProgressBar.progress = 0
+            downloadOverlay.visibility = View.VISIBLE
         }
 
-        downloadId = (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-        showDownloadOverlay(versionName)
-        startProgressPolling()
-    }
+        // Download di background thread
+        Thread {
+            try {
+                var connection = URL(downloadUrl).openConnection() as HttpURLConnection
+                connection.instanceFollowRedirects = true
+                connection.connectTimeout = 15000
+                connection.readTimeout = 15000
+                connection.connect()
 
-    private fun showDownloadOverlay(versionName: String) {
-        downloadTitle.text = "Mengunduh MMS-X v$versionName..."
-        downloadPercent.text = "0%"
-        downloadProgressBar.progress = 0
-        downloadOverlay.visibility = View.VISIBLE
-    }
+                // Handle redirect manual jika perlu
+                var responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_MOVED_TEMP ||
+                    responseCode == HttpURLConnection.HTTP_MOVED_PERM ||
+                    responseCode == 307 || responseCode == 308) {
+                    val newUrl = connection.getHeaderField("Location")
+                    connection.disconnect()
+                    connection = URL(newUrl).openConnection() as HttpURLConnection
+                    connection.connectTimeout = 15000
+                    connection.readTimeout = 15000
+                    connection.connect()
+                    responseCode = connection.responseCode
+                }
 
-    private fun hideDownloadOverlay() {
-        runOnUiThread { downloadOverlay.visibility = View.GONE }
-    }
+                val fileSize = connection.contentLength
+                val input = connection.inputStream
+                val output = FileOutputStream(apkFile)
+                val buffer = ByteArray(8192)
+                var downloaded = 0L
+                var bytes: Int
 
-    private fun startProgressPolling() {
-        progressRunnable = object : Runnable {
-            override fun run() {
-                val dm = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
-                val cursor = dm.query(DownloadManager.Query().setFilterById(downloadId))
-                if (cursor != null && cursor.moveToFirst()) {
-                    val downloaded = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
-                    val total = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
-                    cursor.close()
-                    if (total > 0) {
-                        val pct = (downloaded * 100 / total).toInt()
-                        runOnUiThread {
+                while (input.read(buffer).also { bytes = it } != -1) {
+                    output.write(buffer, 0, bytes)
+                    downloaded += bytes
+                    if (fileSize > 0) {
+                        val pct = (downloaded * 100 / fileSize).toInt()
+                        handler.post {
                             downloadProgressBar.progress = pct
                             downloadPercent.text = "$pct%"
                         }
                     }
                 }
-                handler.postDelayed(this, 500)
+
+                output.flush()
+                output.close()
+                input.close()
+                connection.disconnect()
+
+                // Download selesai
+                handler.post {
+                    downloadProgressBar.progress = 100
+                    downloadPercent.text = "100%"
+                    handler.postDelayed({
+                        downloadOverlay.visibility = View.GONE
+                        showInstallDialog()
+                    }, 500)
+                }
+
+            } catch (e: Exception) {
+                handler.post {
+                    downloadOverlay.visibility = View.GONE
+                    AlertDialog.Builder(this)
+                        .setTitle("Download Gagal")
+                        .setMessage("Gagal mengunduh update: ${e.message}")
+                        .setCancelable(false)
+                        .setPositiveButton("Coba Lagi") { _, _ -> startDownload(downloadUrl, versionName) }
+                        .setNegativeButton("Nanti", null)
+                        .show()
+                }
             }
-        }
-        handler.post(progressRunnable!!)
+        }.start()
     }
 
-    private fun stopProgressPolling() {
-        progressRunnable?.let { handler.removeCallbacks(it) }
-        progressRunnable = null
+    // ===== DIALOG INSTALL =====
+    private fun showInstallDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Download Selesai")
+            .setMessage("MMS-X versi terbaru siap diinstall.")
+            .setCancelable(false)
+            .setPositiveButton("Install Sekarang") { _, _ -> installApk() }
+            .create().also {
+                it.setCanceledOnTouchOutside(false)
+                it.show()
+            }
     }
 
-    // Cek izin "Install Unknown Apps" sebelum launch installer
-    private fun triggerInstall() {
+    // ===== INSTALL APK =====
+    private fun installApk() {
+        // Cek izin Install Unknown Apps
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
             AlertDialog.Builder(this)
                 .setTitle("Izin Diperlukan")
-                .setMessage("Aktifkan izin 'Install Unknown Apps' untuk MMS-X agar update bisa diinstall.")
+                .setMessage("Aktifkan izin \"Install Unknown Apps\" untuk MMS-X agar update dapat diinstall.")
                 .setCancelable(false)
                 .setPositiveButton("Buka Pengaturan") { _, _ ->
                     startActivityForResult(
@@ -244,14 +268,42 @@ class MainActivity : AppCompatActivity() {
                         REQUEST_INSTALL_PERMISSION
                     )
                 }
-                .setNegativeButton("Batal", null)
-                .show()
-        } else {
-            installApk()
+                .create().also {
+                    it.setCanceledOnTouchOutside(false)
+                    it.show()
+                }
+            return
+        }
+
+        val apkPath = getSharedPreferences("mmsx_prefs", MODE_PRIVATE)
+            .getString("pending_apk", null) ?: return
+        val apkFile = File(apkPath)
+
+        if (!apkFile.exists() || apkFile.length() == 0L) {
+            AlertDialog.Builder(this)
+                .setTitle("File Tidak Ditemukan")
+                .setMessage("File APK tidak ditemukan. Coba download ulang.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+
+        try {
+            val apkUri = FileProvider.getUriForFile(this, "${packageName}.provider", apkFile)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(apkUri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            AlertDialog.Builder(this)
+                .setTitle("Install Gagal")
+                .setMessage("Error: ${e.message}")
+                .setPositiveButton("OK", null).show()
         }
     }
 
-    // Dipanggil setelah user kembali dari Settings izin
+    // ===== KEMBALI DARI SETTINGS IZIN =====
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
@@ -261,34 +313,23 @@ class MainActivity : AppCompatActivity() {
                 installApk()
             } else {
                 AlertDialog.Builder(this)
-                    .setTitle("Izin Ditolak")
-                    .setMessage("Update tidak bisa diinstall karena izin tidak diberikan.")
-                    .setPositiveButton("OK", null).show()
+                    .setTitle("Izin Belum Diaktifkan")
+                    .setMessage("Update tidak dapat diinstall. Aktifkan izin \"Install Unknown Apps\" untuk MMS-X.")
+                    .setCancelable(false)
+                    .setPositiveButton("Coba Lagi") { _, _ -> installApk() }
+                    .create().also {
+                        it.setCanceledOnTouchOutside(false)
+                        it.show()
+                    }
             }
         }
     }
 
-    private fun installApk() {
-        val apkName = getSharedPreferences("mmsx_prefs", MODE_PRIVATE).getString("pending_apk", null) ?: return
-        val apkFile = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), apkName)
-        if (!apkFile.exists()) return
-
-        val apkUri = FileProvider.getUriForFile(this, "${packageName}.provider", apkFile)
-        startActivity(Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(apkUri, "application/vnd.android.package-archive")
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
-        })
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        stopProgressPolling()
-        unregisterReceiver(downloadReceiver)
-    }
-
+    // ===== BACK BUTTON =====
     @Deprecated("Deprecated in Java")
     @SuppressLint("GestureBackNavigation")
     override fun onBackPressed() {
+        if (isUpdatePending) return
         if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
     }
 }
