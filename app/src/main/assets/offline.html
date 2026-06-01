@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Offline - MMS-X</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: #ffffff;
+            text-align: center;
+            padding: 32px 24px;
+            -webkit-font-smoothing: antialiased;
+        }
+        .icon {
+            font-size: 72px;
+            margin-bottom: 24px;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50%       { transform: scale(1.08); opacity: 0.75; }
+        }
+        h1 {
+            font-size: 22px;
+            font-weight: 800;
+            color: #e61523;
+            margin-bottom: 12px;
+            letter-spacing: -0.3px;
+        }
+        p {
+            color: #777;
+            font-size: 14px;
+            line-height: 1.7;
+            margin-bottom: 36px;
+            max-width: 280px;
+        }
+        .btn {
+            background: #e61523;
+            color: #fff;
+            border: none;
+            padding: 14px 36px;
+            border-radius: 14px;
+            font-weight: 800;
+            font-size: 15px;
+            cursor: pointer;
+            box-shadow: 0 8px 20px rgba(230,21,35,0.25);
+            transition: opacity 0.2s, transform 0.15s;
+            letter-spacing: 0.2px;
+        }
+        .btn:active { opacity: 0.85; transform: scale(0.97); }
+        .brand {
+            margin-top: 48px;
+            font-size: 12px;
+            font-weight: 700;
+            color: #ddd;
+            letter-spacing: 1px;
+        }
+    </style>
+</head>
+<body>
+    <div class="icon">📡</div>
+    <h1 id="title">Kamu Sedang Offline</h1>
+    <p id="desc">MMS-X membutuhkan koneksi internet untuk mengakses database. Silakan periksa WiFi atau data seluler kamu, lalu coba lagi.</p>
+    <button class="btn" id="btn" onclick="retryConnection()">COBA LAGI</button>
+    <div class="brand">MMS-X</div>
+
+    <script>
+        // Multi-bahasa dari localStorage
+        const texts = {
+            id: {
+                title: 'Kamu Sedang Offline',
+                desc:  'MMS-X membutuhkan koneksi internet untuk mengakses database. Silakan periksa WiFi atau data seluler kamu, lalu coba lagi.',
+                btn:   'COBA LAGI'
+            },
+            en: {
+                title: 'You Are Offline',
+                desc:  'MMS-X requires an internet connection to access the database. Please check your WiFi or mobile data, then try again.',
+                btn:   'TRY AGAIN'
+            },
+            cn: {
+                title: '您已离线',
+                desc:  'MMS-X 需要互联网连接才能访问数据库。请检查 WiFi 或移动数据连接后重试。',
+                btn:   '重试'
+            }
+        };
+
+        try {
+            const lang = localStorage.getItem('mms_lang') || 'id';
+            const t = texts[lang] || texts['id'];
+            document.getElementById('title').innerText = t.title;
+            document.getElementById('desc').innerText  = t.desc;
+            document.getElementById('btn').innerText   = t.btn;
+            document.documentElement.lang = lang;
+        } catch(e) {}
+
+        function retryConnection() {
+            // Coba load ulang URL asli
+            window.location.href = 'https://mmsx.pages.dev/app/?app=mmsx';
+        }
+
+        // Auto redirect kalau internet nyambung lagi
+        window.addEventListener('online', () => {
+            window.location.href = 'https://mmsx.pages.dev/app/?app=mmsx';
+        });
+    </script>
+</body>
+</html>

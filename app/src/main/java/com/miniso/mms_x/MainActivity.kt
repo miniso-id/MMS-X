@@ -2,34 +2,56 @@ package com.miniso.mms_x
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.android.volley.Request
 import com.android.volley.toolbox.JsonObjectRequest
 import com.android.volley.toolbox.Volley
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private val TARGET_URL = "https://mmsx.pages.dev/app/?app=mmsx"
+    private var downloadId: Long = -1
+
+    // Receiver: dipanggil saat download selesai
+    private val downloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
+            if (id == downloadId) {
+                installApk(context)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // 1. Inisialisasi WebView
         webView = findViewById(R.id.webview)
 
-        // 2. Pengaturan WebView agar fitur Scanner & JS jalan
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -39,10 +61,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.webViewClient = object : WebViewClient() {
+
+            // Offline: tampilkan halaman offline dari assets
+            override fun onReceivedError(
+                view: WebView,
+                request: WebResourceRequest,
+                error: WebResourceError
+            ) {
+                if (request.isForMainFrame) {
+                    view.loadUrl("file:///android_asset/offline.html")
+                }
+            }
+
+            // Feishu & intent links
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                 if (url == null) return false
 
-                // 1. Tangani jika URL adalah link Intent langsung
                 if (url.startsWith("intent://") || url.startsWith("lark://") || url.startsWith("feishu://")) {
                     try {
                         val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
@@ -50,7 +84,6 @@ class MainActivity : AppCompatActivity() {
                             startActivity(intent)
                             return true
                         }
-                        // Jika aplikasi tidak ada, buka Play Store (fallback)
                         val fallbackUrl = intent.getStringExtra("browser_fallback_url")
                         view?.loadUrl(fallbackUrl ?: "https://play.google.com/store/apps/details?id=com.ss.android.lark")
                         return true
@@ -59,33 +92,49 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // 2. Tangani khusus link applink.feishu.cn agar tidak error "undefined"
                 if (url.contains("applink.feishu.cn") || url.contains("applink.larksuite.com")) {
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
                     startActivity(intent)
-                    return true // Paksa buka di browser eksternal atau aplikasi Feishu langsung
+                    return true
                 }
 
                 return false
             }
         }
 
-        // 3. Handle izin Kamera di dalam WebView (PENTING untuk Scan Barcode)
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
                 request.grant(request.resources)
             }
         }
 
-        // 4. Load URL aplikasi Miniso kamu
-        webView.loadUrl("https://mmsx.pages.dev/app/?app=mmsx")
+        // Cek internet sebelum load
+        if (isOnline()) {
+            webView.loadUrl(TARGET_URL)
+        } else {
+            webView.loadUrl("file:///android_asset/offline.html")
+        }
 
-        // 5. Cek Izin Kamera & Jalankan Cek Update
         checkCameraPermission()
         checkUpdate()
+
+        // Register receiver untuk download selesai
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(downloadReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
+        }
     }
 
-    // Fungsi untuk meminta izin kamera ke sistem Android
+    // Cek koneksi internet
+    private fun isOnline(): Boolean {
+        val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = cm.activeNetwork ?: return false
+        val capabilities = cm.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
     private fun checkCameraPermission() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             != PackageManager.PERMISSION_GRANTED) {
@@ -93,13 +142,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Fungsi Cek Update otomatis dari file JSON di GitHub
+    // Cek update dari version.json
     private fun checkUpdate() {
         val url = "https://mmsx.pages.dev/app/version.json"
 
-        // Ambil versi APK saat ini
         val currentVersion = try {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 packageManager.getPackageInfo(packageName, 0).longVersionCode.toInt()
             } else {
                 @Suppress("DEPRECATION")
@@ -110,11 +158,11 @@ class MainActivity : AppCompatActivity() {
         val request = JsonObjectRequest(Request.Method.GET, url, null,
             { response ->
                 val latestVersion = response.getInt("latestVersionCode")
+                val latestVersionName = response.getString("latestVersionName")
                 val downloadUrl = response.getString("updateUrl")
 
-                // Jika versi di GitHub lebih tinggi, tampilkan dialog
                 if (latestVersion > currentVersion) {
-                    showUpdateDialog(downloadUrl)
+                    showUpdateDialog(latestVersionName, downloadUrl)
                 }
             },
             { error ->
@@ -124,21 +172,71 @@ class MainActivity : AppCompatActivity() {
         Volley.newRequestQueue(this).add(request)
     }
 
-    // Tampilan Pop-up Notifikasi Update
-    private fun showUpdateDialog(downloadUrl: String) {
+    // Dialog update dengan tombol Download
+    private fun showUpdateDialog(versionName: String, downloadUrl: String) {
         AlertDialog.Builder(this)
             .setTitle("Update MMS-X Tersedia")
-            .setMessage("Versi terbaru sudah tersedia. Download sekarang ?")
-            .setCancelable(false) // User harus memilih
-            .setPositiveButton("Download") { _, _ ->
-                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(downloadUrl))
-                startActivity(intent)
+            .setMessage("Versi $versionName sudah tersedia.\nDownload dan install sekarang?")
+            .setCancelable(false)
+            .setPositiveButton("Download & Install") { _, _ ->
+                startDownload(downloadUrl, versionName)
             }
             .setNegativeButton("Nanti", null)
             .show()
     }
 
-    // Navigasi tombol Back HP (agar tidak langsung keluar app)
+    // Download APK pakai DownloadManager (ada progress bar di notification)
+    private fun startDownload(downloadUrl: String, versionName: String) {
+        // Hapus APK lama kalau ada
+        val apkFile = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "MMS-X-$versionName.apk")
+        if (apkFile.exists()) apkFile.delete()
+
+        val request = DownloadManager.Request(Uri.parse(downloadUrl)).apply {
+            setTitle("MMS-X Update")
+            setDescription("Mengunduh MMS-X v$versionName...")
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            setDestinationInExternalFilesDir(
+                this@MainActivity,
+                Environment.DIRECTORY_DOWNLOADS,
+                "MMS-X-$versionName.apk"
+            )
+            setMimeType("application/vnd.android.package-archive")
+        }
+
+        val dm = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+        downloadId = dm.enqueue(request)
+
+        // Simpan nama file untuk dipakai saat install
+        getSharedPreferences("mmsx_prefs", MODE_PRIVATE)
+            .edit().putString("pending_apk", "MMS-X-$versionName.apk").apply()
+    }
+
+    // Install APK setelah download selesai
+    private fun installApk(context: Context) {
+        val versionName = getSharedPreferences("mmsx_prefs", MODE_PRIVATE)
+            .getString("pending_apk", null) ?: return
+
+        val apkFile = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), versionName)
+        if (!apkFile.exists()) return
+
+        val apkUri = FileProvider.getUriForFile(
+            context,
+            "${packageName}.provider",
+            apkFile
+        )
+
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(apkUri, "application/vnd.android.package-archive")
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+        }
+        context.startActivity(intent)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(downloadReceiver)
+    }
+
     @Deprecated("Deprecated in Java")
     @SuppressLint("GestureBackNavigation")
     override fun onBackPressed() {
