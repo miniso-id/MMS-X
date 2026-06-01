@@ -16,6 +16,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.View
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -47,15 +48,26 @@ class MainActivity : AppCompatActivity() {
     private var downloadId: Long = -1
     private val handler = Handler(Looper.getMainLooper())
     private var progressRunnable: Runnable? = null
+    private var pendingApkName: String? = null
 
-    // Receiver: dipanggil saat download selesai
+    companion object {
+        private const val REQUEST_INSTALL_PERMISSION = 200
+    }
+
     private val downloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
             if (id == downloadId) {
                 stopProgressPolling()
-                hideDownloadOverlay()
-                installApk(context)
+                // Set 100% dulu sebentar, baru hide
+                runOnUiThread {
+                    downloadProgressBar.progress = 100
+                    downloadPercent.text = "100%"
+                }
+                handler.postDelayed({
+                    hideDownloadOverlay()
+                    triggerInstall()
+                }, 600)
             }
         }
     }
@@ -64,11 +76,11 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        webView           = findViewById(R.id.webview)
-        downloadOverlay   = findViewById(R.id.downloadOverlay)
+        webView             = findViewById(R.id.webview)
+        downloadOverlay     = findViewById(R.id.downloadOverlay)
         downloadProgressBar = findViewById(R.id.downloadProgressBar)
-        downloadPercent   = findViewById(R.id.downloadPercent)
-        downloadTitle     = findViewById(R.id.downloadTitle)
+        downloadPercent     = findViewById(R.id.downloadPercent)
+        downloadTitle       = findViewById(R.id.downloadTitle)
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -79,56 +91,36 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.webViewClient = object : WebViewClient() {
-
-            override fun onReceivedError(
-                view: WebView,
-                request: WebResourceRequest,
-                error: WebResourceError
-            ) {
-                if (request.isForMainFrame) {
-                    view.loadUrl("file:///android_asset/offline.html")
-                }
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame) view.loadUrl("file:///android_asset/offline.html")
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                 if (url == null) return false
-
                 if (url.startsWith("intent://") || url.startsWith("lark://") || url.startsWith("feishu://")) {
                     try {
                         val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
                         if (intent.resolveActivity(packageManager) != null) {
-                            startActivity(intent)
-                            return true
+                            startActivity(intent); return true
                         }
-                        val fallbackUrl = intent.getStringExtra("browser_fallback_url")
-                        view?.loadUrl(fallbackUrl ?: "https://play.google.com/store/apps/details?id=com.ss.android.lark")
+                        val fallback = intent.getStringExtra("browser_fallback_url")
+                        view?.loadUrl(fallback ?: "https://play.google.com/store/apps/details?id=com.ss.android.lark")
                         return true
-                    } catch (e: Exception) {
-                        return false
-                    }
+                    } catch (e: Exception) { return false }
                 }
-
                 if (url.contains("applink.feishu.cn") || url.contains("applink.larksuite.com")) {
-                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                    startActivity(intent)
-                    return true
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))); return true
                 }
-
                 return false
             }
         }
 
         webView.webChromeClient = object : WebChromeClient() {
-            override fun onPermissionRequest(request: PermissionRequest) {
-                request.grant(request.resources)
-            }
+            override fun onPermissionRequest(request: PermissionRequest) = request.grant(request.resources)
         }
 
-        if (isOnline()) {
-            webView.loadUrl(TARGET_URL)
-        } else {
-            webView.loadUrl("file:///android_asset/offline.html")
-        }
+        if (isOnline()) webView.loadUrl(TARGET_URL)
+        else webView.loadUrl("file:///android_asset/offline.html")
 
         checkCameraPermission()
         checkUpdate()
@@ -143,44 +135,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun isOnline(): Boolean {
         val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = cm.activeNetwork ?: return false
-        val capabilities = cm.getNetworkCapabilities(network) ?: return false
-        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return false) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun checkCameraPermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 101)
-        }
     }
 
     private fun checkUpdate() {
-        val url = "https://mmsx.pages.dev/app/version.json"
-
         val currentVersion = try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
                 packageManager.getPackageInfo(packageName, 0).longVersionCode.toInt()
-            } else {
-                @Suppress("DEPRECATION")
-                packageManager.getPackageInfo(packageName, 0).versionCode
-            }
+            else @Suppress("DEPRECATION") packageManager.getPackageInfo(packageName, 0).versionCode
         } catch (e: Exception) { 0 }
 
-        val request = JsonObjectRequest(Request.Method.GET, url, null,
+        val req = JsonObjectRequest(Request.Method.GET, "https://mmsx.pages.dev/app/version.json", null,
             { response ->
-                val latestVersion = response.getInt("latestVersionCode")
-                val latestVersionName = response.getString("latestVersionName")
-                val downloadUrl = response.getString("updateUrl")
-                if (latestVersion > currentVersion) {
-                    showUpdateDialog(latestVersionName, downloadUrl)
-                }
+                val latest = response.getInt("latestVersionCode")
+                val name   = response.getString("latestVersionName")
+                val dlUrl  = response.getString("updateUrl")
+                if (latest > currentVersion) showUpdateDialog(name, dlUrl)
             },
-            { error ->
-                android.util.Log.e("MMSX_DEBUG", "Gagal cek update: ${error.message}")
-            }
+            { android.util.Log.e("MMSX", "Gagal cek update: ${it.message}") }
         )
-        Volley.newRequestQueue(this).add(request)
+        Volley.newRequestQueue(this).add(req)
     }
 
     private fun showUpdateDialog(versionName: String, downloadUrl: String) {
@@ -188,41 +168,30 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Update MMS-X Tersedia")
             .setMessage("Versi $versionName sudah tersedia.\nDownload dan install sekarang?")
             .setCancelable(false)
-            .setPositiveButton("Download & Install") { _, _ ->
-                startDownload(downloadUrl, versionName)
-            }
+            .setPositiveButton("Download & Install") { _, _ -> startDownload(downloadUrl, versionName) }
             .setNegativeButton("Nanti", null)
             .show()
     }
 
     private fun startDownload(downloadUrl: String, versionName: String) {
-        val apkFile = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "MMS-X-$versionName.apk")
-        if (apkFile.exists()) apkFile.delete()
+        pendingApkName = "MMS-X-$versionName.apk"
+        getSharedPreferences("mmsx_prefs", MODE_PRIVATE).edit().putString("pending_apk", pendingApkName).apply()
+
+        File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), pendingApkName!!).also { if (it.exists()) it.delete() }
 
         val request = DownloadManager.Request(Uri.parse(downloadUrl)).apply {
             setTitle("MMS-X Update")
             setDescription("Mengunduh MMS-X v$versionName...")
             setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            setDestinationInExternalFilesDir(
-                this@MainActivity,
-                Environment.DIRECTORY_DOWNLOADS,
-                "MMS-X-$versionName.apk"
-            )
+            setDestinationInExternalFilesDir(this@MainActivity, Environment.DIRECTORY_DOWNLOADS, pendingApkName!!)
             setMimeType("application/vnd.android.package-archive")
         }
 
-        val dm = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
-        downloadId = dm.enqueue(request)
-
-        getSharedPreferences("mmsx_prefs", MODE_PRIVATE)
-            .edit().putString("pending_apk", "MMS-X-$versionName.apk").apply()
-
-        // Tampilkan overlay progress
+        downloadId = (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
         showDownloadOverlay(versionName)
         startProgressPolling()
     }
 
-    // Tampilkan overlay di bawah layar
     private fun showDownloadOverlay(versionName: String) {
         downloadTitle.text = "Mengunduh MMS-X v$versionName..."
         downloadPercent.text = "0%"
@@ -234,28 +203,23 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread { downloadOverlay.visibility = View.GONE }
     }
 
-    // Polling progress setiap 500ms
     private fun startProgressPolling() {
         progressRunnable = object : Runnable {
             override fun run() {
                 val dm = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
-                val query = DownloadManager.Query().setFilterById(downloadId)
-                val cursor = dm.query(query)
-
+                val cursor = dm.query(DownloadManager.Query().setFilterById(downloadId))
                 if (cursor != null && cursor.moveToFirst()) {
                     val downloaded = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
                     val total = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
                     cursor.close()
-
                     if (total > 0) {
-                        val percent = (downloaded * 100 / total).toInt()
+                        val pct = (downloaded * 100 / total).toInt()
                         runOnUiThread {
-                            downloadProgressBar.progress = percent
-                            downloadPercent.text = "$percent%"
+                            downloadProgressBar.progress = pct
+                            downloadPercent.text = "$pct%"
                         }
                     }
                 }
-
                 handler.postDelayed(this, 500)
             }
         }
@@ -267,24 +231,53 @@ class MainActivity : AppCompatActivity() {
         progressRunnable = null
     }
 
-    private fun installApk(context: Context) {
-        val apkName = getSharedPreferences("mmsx_prefs", MODE_PRIVATE)
-            .getString("pending_apk", null) ?: return
+    // Cek izin "Install Unknown Apps" sebelum launch installer
+    private fun triggerInstall() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            AlertDialog.Builder(this)
+                .setTitle("Izin Diperlukan")
+                .setMessage("Aktifkan izin 'Install Unknown Apps' untuk MMS-X agar update bisa diinstall.")
+                .setCancelable(false)
+                .setPositiveButton("Buka Pengaturan") { _, _ ->
+                    startActivityForResult(
+                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
+                        REQUEST_INSTALL_PERMISSION
+                    )
+                }
+                .setNegativeButton("Batal", null)
+                .show()
+        } else {
+            installApk()
+        }
+    }
 
+    // Dipanggil setelah user kembali dari Settings izin
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_INSTALL_PERMISSION) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && packageManager.canRequestPackageInstalls()) {
+                installApk()
+            } else {
+                AlertDialog.Builder(this)
+                    .setTitle("Izin Ditolak")
+                    .setMessage("Update tidak bisa diinstall karena izin tidak diberikan.")
+                    .setPositiveButton("OK", null).show()
+            }
+        }
+    }
+
+    private fun installApk() {
+        val apkName = getSharedPreferences("mmsx_prefs", MODE_PRIVATE).getString("pending_apk", null) ?: return
         val apkFile = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), apkName)
         if (!apkFile.exists()) return
 
-        val apkUri = FileProvider.getUriForFile(
-            context,
-            "${packageName}.provider",
-            apkFile
-        )
-
-        val intent = Intent(Intent.ACTION_VIEW).apply {
+        val apkUri = FileProvider.getUriForFile(this, "${packageName}.provider", apkFile)
+        startActivity(Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(apkUri, "application/vnd.android.package-archive")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
-        }
-        context.startActivity(intent)
+        })
     }
 
     override fun onDestroy() {
@@ -296,10 +289,6 @@ class MainActivity : AppCompatActivity() {
     @Deprecated("Deprecated in Java")
     @SuppressLint("GestureBackNavigation")
     override fun onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
-        }
+        if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
     }
 }
