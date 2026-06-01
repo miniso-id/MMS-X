@@ -14,4 +14,48 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- Download progress overlay -->
+    <LinearLayout
+        android:id="@+id/downloadOverlay"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#F2FFFFFF"
+        android:padding="24dp"
+        android:visibility="gone"
+        android:elevation="8dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <TextView
+            android:id="@+id/downloadTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Mengunduh Update..."
+            android:textColor="#1a1a1a"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp"/>
+
+        <TextView
+            android:id="@+id/downloadPercent"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="0%"
+            android:textColor="#e61523"
+            android:textSize="13sp"
+            android:layout_marginBottom="10dp"/>
+
+        <ProgressBar
+            android:id="@+id/downloadProgressBar"
+            style="@style/Widget.AppCompat.ProgressBar.Horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="8dp"
+            android:progressDrawable="@drawable/progress_bar_red"
+            android:max="100"
+            android:progress="0" />
+
+    </LinearLayout>
+
 </androidx.constraintlayout.widget.ConstraintLayout>
